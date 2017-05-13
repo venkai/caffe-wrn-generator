@@ -1,0 +1,4 @@
+
+/load_caffe_dependencies.sh
+/setup_wrn.sh
+/*.prototxt
