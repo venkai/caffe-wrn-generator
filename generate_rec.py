@@ -82,22 +82,17 @@ class WideResidualNetworkGenerator:
         for i, p in enumerate(conv_params):
             branch_layer_name = '%sa_%d' % (basename, i + 1)
             add_dropout = i in dropout_layers and config['dropout']
-
-            if generate_deploy:
-                bn = L.BatchNorm(resunit_layer, in_place=i > 0, batch_norm_param={'use_global_stats': True})
-            else:
-                bn = L.BatchNorm(resunit_layer, in_place=i > 0)
-            scale = L.Scale(bn, in_place=True, scale_param={'bias_term': True})
-            relu = L.ReLU(scale, in_place=True)
             if add_dropout:
-                drop = L.Dropout(relu, in_place=True, dropout_ratio=config['dropout'])
-            conv = L.Convolution(drop if add_dropout else relu, weight_filler={'type': 'msra'}, bias_term=False, **p)
+                drop = L.Dropout(resunit_layer, in_place=True, dropout_ratio=config['dropout'])
+            reconv = L.RecursiveConv(drop if add_dropout else resunit_layer, in_place=True,
+                                     param=dict(lr_mult=0.1, decay_mult=1),
+                                     recursive_conv_param=dict(num_recursive_layers=5, num_unique_weights=5,
+                                                           relu_param={'negative_slope': 0.27}))
+            conv = L.Convolution(reconv, weight_filler={'type': 'msra'}, bias_term=False, **p)
 
-            net[branch_layer_name + '_bn'] = bn
-            net[branch_layer_name + '_scale'] = scale
-            net[branch_layer_name + '_relu'] = relu
             if add_dropout:
                 net[branch_layer_name + '_dropout'] = drop
+            net[branch_layer_name + '_reconv'] = reconv
             net[branch_layer_name + '_%dx%d_s%d' % (p['kernel_size'], p['kernel_size'], p['stride'])] = conv
             resunit_layer = conv
 
@@ -181,21 +176,16 @@ class WideResidualNetworkGenerator:
         else:
             layer_idx = 5
 
-        if deploy:
-            bn = L.BatchNorm(bottom, batch_norm_param={'use_global_stats': True})
-        else:
-            bn = L.BatchNorm(bottom)
-        scale = L.Scale(bn, in_place=True, scale_param={'bias_term': True})
-        relu = L.ReLU(scale, in_place=True)
-        pool = L.Pooling(relu, pool=P.Pooling.AVE, global_pooling=True)
+        reconv = L.RecursiveConv(bottom, in_place=True,
+                                 recursive_conv_param=dict(num_recursive_layers=10, num_unique_weights=10,
+                                                           relu_param={'negative_slope': 0.45}))
+        pool = L.Pooling(reconv, pool=P.Pooling.AVE, global_pooling=True)
         fc = L.InnerProduct(pool,
                             param=[dict(lr_mult=1, decay_mult=1), dict(lr_mult=2, decay_mult=0)],
                             num_output=self.__config['num-classes'], weight_filler={'type': 'gaussian', 'std': 0.01},
                             bias_filler={'type': 'constant', 'value': 0})
 
-        n['bn_%d' % layer_idx] = bn
-        n['scale_%d' % layer_idx] = scale
-        n['relu_%d' % layer_idx] = relu
+        n['reconv_%d' % layer_idx] = reconv
         n['pool_%d' % layer_idx] = pool
         n['fc%d' % self.__config['num-classes']] = fc
         return fc
